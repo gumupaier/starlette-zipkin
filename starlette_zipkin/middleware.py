@@ -3,7 +3,7 @@ import socket
 import traceback
 import urllib
 from contextvars import ContextVar
-from typing import Any, Callable
+from typing import Any, Callable, Union, Dict
 from urllib.parse import urlunparse
 
 import aiozipkin as az
@@ -22,17 +22,19 @@ _tracer_ctx_var: ContextVar[Any] = ContextVar("tracer", default=None)
 
 class ZipkinConfig:
     def __init__(
-        self,
-        host: str = "localhost",
-        port: int = 9411,
-        service_name: str = "service_name",
-        sample_rate: float = 1.0,
-        inject_response_headers: bool = True,
-        force_new_trace: bool = False,
-        json_encoder: Callable = json.dumps,
-        header_formatter: Any = B3Headers,
-        header_formatter_kwargs: dict = {},
+            self,
+            host: str = "localhost",
+            port: int = 9411,
+            service_name: str = "service_name",
+            sample_rate: float = 1.0,
+            inject_response_headers: bool = True,
+            force_new_trace: bool = False,
+            json_encoder: Callable = json.dumps,
+            header_formatter: Any = B3Headers,
+            header_formatter_kwargs=None,
     ):
+        if header_formatter_kwargs is None:
+            header_formatter_kwargs = {}
         self.host = host
         self.port = port
         self.service_name = service_name
@@ -44,9 +46,8 @@ class ZipkinConfig:
 
 
 class ZipkinMiddleware(BaseHTTPMiddleware):
-    def __init__(
-        self, app: Starlette, dispatch: Callable = None, config: ZipkinConfig = None
-    ):
+    def __init__(self, app: Starlette, dispatch: Callable = None, config: ZipkinConfig = None):
+        super().__init__(app, dispatch)
         self.app = app
         self.dispatch_func = self.dispatch if dispatch is None else dispatch
         self.config = config or ZipkinConfig()
@@ -54,7 +55,7 @@ class ZipkinMiddleware(BaseHTTPMiddleware):
         self.tracer = None
 
     async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
+            self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
         await self.init_tracer()
         tracer = get_tracer()
@@ -70,8 +71,8 @@ class ZipkinMiddleware(BaseHTTPMiddleware):
             try:
                 # set root span using context variable
                 root_span = _root_span_ctx_var.set(span)
-
                 self.before(span, request.scope)
+
                 response = await call_next(request)
                 self.after(span, response)
 
@@ -83,8 +84,7 @@ class ZipkinMiddleware(BaseHTTPMiddleware):
 
             finally:
                 _root_span_ctx_var.reset(root_span)
-
-        await tracer.close()
+                await tracer.close()
 
     async def init_tracer(self) -> None:
         if self.tracer is None:
@@ -138,9 +138,9 @@ class ZipkinMiddleware(BaseHTTPMiddleware):
         if self.config.inject_response_headers:
             self.config.header_formatter.update_headers(span, response)
 
-        span.tag("http.status_code", response.status_code)
+        span.tag("http.status_code", str(response.status_code))
         if response.status_code >= 400:
-            span.tag("error", True)
+            span.tag("error", '1')
         span.tag(
             "http.response.headers",
             self.config.json_encoder(dict(response.headers)),
@@ -155,7 +155,7 @@ class ZipkinMiddleware(BaseHTTPMiddleware):
         #     )
 
     def error(self, span: SpanAbc, error: Exception) -> None:
-        span.tag("error", True)
+        span.tag("error", '1')
         span.tag("error.object", type(error).__name__)
         span.tag("error.stack", traceback.format_exc())
 
@@ -173,7 +173,7 @@ class ZipkinMiddleware(BaseHTTPMiddleware):
         )
         return url
 
-    def get_headers(self, scope: Scope) -> dict:
+    def get_headers(self, scope: Scope) -> Union[dict, str]:
         """
         Extract headers from the ASGI scope.
         """
@@ -199,9 +199,9 @@ class ZipkinMiddleware(BaseHTTPMiddleware):
         """
         endpoint = scope["endpoint"]
         qualname = (
-            getattr(endpoint, "__qualname__", None)
-            or getattr(endpoint, "__name__", None)
-            or None
+                getattr(endpoint, "__qualname__", None)
+                or getattr(endpoint, "__name__", None)
+                or None
         )
         if not qualname:
             return ""
@@ -219,3 +219,9 @@ def get_tracer() -> Any:
 def get_ip() -> Any:
     hostname = socket.gethostname()
     return socket.gethostbyname(hostname)
+
+
+def get_trace_headers() -> Dict:
+    config = ZipkinConfig()
+    span = get_root_span()
+    return config.header_formatter.make_headers(span.context, dict())
